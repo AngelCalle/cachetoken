@@ -1,94 +1,83 @@
-// src/test/java/tu/paquete/TokenIBPServiceTest.java
-package tu.paquete;
 
-import static org.mockito.Mockito.*;
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
 
-import com.github.benmanes.caffeine.cache.Cache; // si usas otra interfaz, mantén solo java.util.function.* y Mockito
-import java.time.Instant;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.ArgumentMatchers;
 import org.mockito.Mock;
-import org.mockito.junit.jupiter.MockitoExtension;
+import org.mockito.MockitoAnnotations;
+import org.slf4j.LoggerFactory;
 
 import reactor.core.publisher.Mono;
-import reactor.test.StepVerifier;
+import tu.paquete.domain.service.impl.TokenIBPService;
 
-@ExtendWith(MockitoExtension.class)
-class TokenIBPServiceTest {
-
-    private static final String CACHE_KEY = "authToken";
+class TokenWarmupTest {
 
     @Mock
-    private WebClientServiceImpl webClientServiceImpl;
+    private TokenIBPService tokenService;
 
-    @Mock
-    private Cache<String, TokenCacheValue> cache;
+    private TokenWarmup warmup;
 
-    @Mock
-    private TokenCacheValue tokenCacheValue;
-
-    private TokenIBPService service;
+    // logger (lombok @Slf4j usa el de la clase)
+    private Logger warmupLogger;
+    private ListAppender<ILoggingEvent> appender;
 
     @BeforeEach
     void setUp() {
-        service = new TokenIBPService(webClientServiceImpl, cache);
+        MockitoAnnotations.openMocks(this);
+        warmup = new TokenWarmup(tokenService);
+
+        warmupLogger = (Logger) LoggerFactory.getLogger(TokenWarmup.class);
+        appender = new ListAppender<>();
+        appender.start();
+        warmupLogger.addAppender(appender);
     }
 
     @Test
-    void getValidToken_devuelveCacheCuandoNoExpira() {
-        when(tokenCacheValue.getToken()).thenReturn("cached-token");
-        when(tokenCacheValue.getExpiresAt()).thenReturn(Instant.now().plusSeconds(60));
-        when(cache.getIfPresent(CACHE_KEY)).thenReturn(tokenCacheValue);
+    void onReady_suscribeYLogueaInfoCuandoExito() {
+        AtomicBoolean subscribed = new AtomicBoolean(false);
+        Mono<String> mono = Mono.fromSupplier(() -> "tok")
+                .doOnSubscribe(s -> subscribed.set(true));
+        when(tokenService.refreshToken()).thenReturn(mono);
 
-        StepVerifier.create(service.getValidToken())
-                .expectNext("cached-token")
-                .verifyComplete();
+        // act
+        warmup.onReady();
 
-        verify(webClientServiceImpl, never()).refreshToken();
+        // assert
+        verify(tokenService, times(1)).refreshToken();
+        assertTrue(subscribed.get(), "El Mono debe haberse suscrito");
+
+        // logs
+        boolean sawInfo = appender.list.stream()
+                .anyMatch(e -> e.getLevel() == Level.INFO &&
+                        e.getFormattedMessage().contains("Token precargado correctamente"));
+        assertTrue(sawInfo, "Debe loguear INFO de precarga correcta");
     }
 
     @Test
-    void getValidToken_refrescaCuandoNoHayEnCache() {
-        when(cache.getIfPresent(CACHE_KEY)).thenReturn(null); // primera lectura en getValidToken()
-        when(webClientServiceImpl.refreshToken()).thenReturn(Mono.just("new-token"));
+    void onReady_suscribeYLogueaWarnCuandoFalla() {
+        AtomicBoolean subscribed = new AtomicBoolean(false);
+        Mono<String> mono = Mono.<String>error(new RuntimeException("boom"))
+                .doOnSubscribe(s -> subscribed.set(true));
+        when(tokenService.refreshToken()).thenReturn(mono);
 
-        StepVerifier.create(service.getValidToken())
-                .expectNext("new-token")
-                .verifyComplete();
+        // act: no debe lanzar excepción (el error se maneja en el flujo)
+        assertDoesNotThrow(() -> warmup.onReady());
 
-        verify(webClientServiceImpl, times(1)).refreshToken();
-    }
+        // assert
+        verify(tokenService, times(1)).refreshToken();
+        assertTrue(subscribed.get(), "El Mono debe haberse suscrito incluso en error");
 
-    @Test
-    void refreshToken_noLlamaClienteSiAlEntrarYaHayTokenValido() {
-        // 1ª llamada desde getValidToken(): miss
-        // 2ª llamada (dentro de refreshToken()): ya existe y no expira
-        when(cache.getIfPresent(CACHE_KEY)).thenReturn(null, tokenCacheValue);
-        when(tokenCacheValue.getToken()).thenReturn("now-valid");
-        when(tokenCacheValue.getExpiresAt()).thenReturn(Instant.now().plusSeconds(120));
-
-        StepVerifier.create(service.getValidToken())
-                .expectNext("now-valid")
-                .verifyComplete();
-
-        verify(webClientServiceImpl, never()).refreshToken();
-    }
-
-    @Test
-    void getValidToken_refrescaCuandoTokenExpirado() {
-        when(tokenCacheValue.getToken()).thenReturn("old-token");
-        when(tokenCacheValue.getExpiresAt()).thenReturn(Instant.now().minusSeconds(5)); // expirado
-        when(cache.getIfPresent(CACHE_KEY)).thenReturn(tokenCacheValue);
-        when(webClientServiceImpl.refreshToken()).thenReturn(Mono.just("fresh-token"));
-
-        StepVerifier.create(service.getValidToken())
-                .expectNext("fresh-token")
-                .verifyComplete();
-
-        verify(webClientServiceImpl, times(1)).refreshToken();
+        boolean sawWarn = appender.list.stream()
+                .anyMatch(e -> e.getLevel() == Level.WARN &&
+                        e.getFormattedMessage().contains("No se pudo precargar el token"));
+        assertTrue(sawWarn, "Debe loguear WARN cuando falla la precarga");
     }
 }
