@@ -45,6 +45,7 @@ public class TokenService {
 		}
 
 		AuthRequest body = new AuthRequest(props.getUsername(), props.getPassword(), props.getExpiresInMins());
+		log.info("llama al tokennnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn");
 
 		return webClient.post().uri(props.getUrl()).contentType(MediaType.APPLICATION_JSON)
 				.accept(MediaType.APPLICATION_JSON).bodyValue(body).retrieve()
