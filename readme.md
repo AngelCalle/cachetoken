@@ -1,87 +1,94 @@
-// src/test/java/tu/paquete/AuthResponseTest.java
+// src/test/java/tu/paquete/TokenIBPServiceTest.java
 package tu.paquete;
 
+import static org.mockito.Mockito.*;
 import static org.junit.jupiter.api.Assertions.*;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.github.benmanes.caffeine.cache.Cache; // si usas otra interfaz, mantén solo java.util.function.* y Mockito
+import java.time.Instant;
+
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentMatchers;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
 
-class AuthResponseTest {
+import reactor.core.publisher.Mono;
+import reactor.test.StepVerifier;
 
-    private ObjectMapper mapper;
+@ExtendWith(MockitoExtension.class)
+class TokenIBPServiceTest {
+
+    private static final String CACHE_KEY = "authToken";
+
+    @Mock
+    private WebClientServiceImpl webClientServiceImpl;
+
+    @Mock
+    private Cache<String, TokenCacheValue> cache;
+
+    @Mock
+    private TokenCacheValue tokenCacheValue;
+
+    private TokenIBPService service;
 
     @BeforeEach
     void setUp() {
-        mapper = new ObjectMapper();
-        // No es necesario configurar FAIL_ON_UNKNOWN_PROPERTIES: la clase tiene @JsonIgnoreProperties(ignoreUnknown = true)
+        service = new TokenIBPService(webClientServiceImpl, cache);
     }
 
     @Test
-    void deserializaSnakeCase_yCamposDesconocidos() throws Exception {
-        String json = """
-          {
-            "access_token": "abc123",
-            "token_type": "Bearer",
-            "expires_in": 3600,
-            "some_unknown_field": "ignored"
-          }
-        """;
+    void getValidToken_devuelveCacheCuandoNoExpira() {
+        when(tokenCacheValue.getToken()).thenReturn("cached-token");
+        when(tokenCacheValue.getExpiresAt()).thenReturn(Instant.now().plusSeconds(60));
+        when(cache.getIfPresent(CACHE_KEY)).thenReturn(tokenCacheValue);
 
-        AuthResponse dto = mapper.readValue(json, AuthResponse.class);
+        StepVerifier.create(service.getValidToken())
+                .expectNext("cached-token")
+                .verifyComplete();
 
-        assertEquals("abc123", dto.getAccessToken());
-        assertEquals("Bearer", dto.getTokenType());
-        assertEquals(3600L, dto.getExpiresIn());
+        verify(webClientServiceImpl, never()).refreshToken();
     }
 
     @Test
-    void deserializaUsandoAlias() throws Exception {
-        // Aunque @JsonNaming ya mapea snake_case, probamos explícitamente los alias
-        String jsonConAlias = """
-          {
-            "access_token": "token-x",
-            "token_type": "bearer",
-            "expires_in": 1200
-          }
-        """;
+    void getValidToken_refrescaCuandoNoHayEnCache() {
+        when(cache.getIfPresent(CACHE_KEY)).thenReturn(null); // primera lectura en getValidToken()
+        when(webClientServiceImpl.refreshToken()).thenReturn(Mono.just("new-token"));
 
-        AuthResponse dto = mapper.readValue(jsonConAlias, AuthResponse.class);
+        StepVerifier.create(service.getValidToken())
+                .expectNext("new-token")
+                .verifyComplete();
 
-        assertAll(
-            () -> assertEquals("token-x", dto.getAccessToken()),
-            () -> assertEquals("bearer", dto.getTokenType()),
-            () -> assertEquals(1200L, dto.getExpiresIn())
-        );
+        verify(webClientServiceImpl, times(1)).refreshToken();
     }
 
     @Test
-    void serializaEnSnakeCase() throws JsonProcessingException {
-        AuthResponse dto = new AuthResponse();
-        dto.setAccessToken("tok-999");
-        dto.setTokenType("Bearer");
-        dto.setExpiresIn(86400L);
+    void refreshToken_noLlamaClienteSiAlEntrarYaHayTokenValido() {
+        // 1ª llamada desde getValidToken(): miss
+        // 2ª llamada (dentro de refreshToken()): ya existe y no expira
+        when(cache.getIfPresent(CACHE_KEY)).thenReturn(null, tokenCacheValue);
+        when(tokenCacheValue.getToken()).thenReturn("now-valid");
+        when(tokenCacheValue.getExpiresAt()).thenReturn(Instant.now().plusSeconds(120));
 
-        String json = mapper.writeValueAsString(dto);
+        StepVerifier.create(service.getValidToken())
+                .expectNext("now-valid")
+                .verifyComplete();
 
-        // Comprueba nombres snake_case y valores
-        assertTrue(json.contains("\"access_token\":\"tok-999\""), json);
-        assertTrue(json.contains("\"token_type\":\"Bearer\""), json);
-        assertTrue(json.contains("\"expires_in\":86400"), json);
-        // No debería contener nombres camelCase
-        assertFalse(json.contains("accessToken"), json);
+        verify(webClientServiceImpl, never()).refreshToken();
     }
 
     @Test
-    void gettersYSettersFuncionan() {
-        AuthResponse dto = new AuthResponse();
-        dto.setAccessToken("A");
-        dto.setTokenType("B");
-        dto.setExpiresIn(1L);
+    void getValidToken_refrescaCuandoTokenExpirado() {
+        when(tokenCacheValue.getToken()).thenReturn("old-token");
+        when(tokenCacheValue.getExpiresAt()).thenReturn(Instant.now().minusSeconds(5)); // expirado
+        when(cache.getIfPresent(CACHE_KEY)).thenReturn(tokenCacheValue);
+        when(webClientServiceImpl.refreshToken()).thenReturn(Mono.just("fresh-token"));
 
-        assertEquals("A", dto.getAccessToken());
-        assertEquals("B", dto.getTokenType());
-        assertEquals(1L, dto.getExpiresIn());
+        StepVerifier.create(service.getValidToken())
+                .expectNext("fresh-token")
+                .verifyComplete();
+
+        verify(webClientServiceImpl, times(1)).refreshToken();
     }
 }
