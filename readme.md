@@ -1,20 +1,15 @@
+package tu.paquete.infrastructure.utils;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import ch.qos.logback.classic.Level;
-import ch.qos.logback.classic.Logger;
-import ch.qos.logback.classic.spi.ILoggingEvent;
-import ch.qos.logback.core.read.ListAppender;
-
+import nl.altindag.log.LogCaptor;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
-import org.slf4j.LoggerFactory;
-
 import reactor.core.publisher.Mono;
 import tu.paquete.domain.service.impl.TokenIBPService;
 
@@ -25,59 +20,51 @@ class TokenWarmupTest {
 
     private TokenWarmup warmup;
 
-    // logger (lombok @Slf4j usa el de la clase)
-    private Logger warmupLogger;
-    private ListAppender<ILoggingEvent> appender;
-
     @BeforeEach
     void setUp() {
         MockitoAnnotations.openMocks(this);
         warmup = new TokenWarmup(tokenService);
-
-        warmupLogger = (Logger) LoggerFactory.getLogger(TokenWarmup.class);
-        appender = new ListAppender<>();
-        appender.start();
-        warmupLogger.addAppender(appender);
     }
 
     @Test
-    void onReady_suscribeYLogueaInfoCuandoExito() {
+    void onReady_suscribeYLogueaInfoEnExito_sinLogback() {
         AtomicBoolean subscribed = new AtomicBoolean(false);
-        Mono<String> mono = Mono.fromSupplier(() -> "tok")
-                .doOnSubscribe(s -> subscribed.set(true));
-        when(tokenService.refreshToken()).thenReturn(mono);
+        when(tokenService.refreshToken())
+                .thenReturn(Mono.fromSupplier(() -> "tok").doOnSubscribe(s -> subscribed.set(true)));
 
-        // act
+        // Captura logs SLF4J de la clase
+        LogCaptor captor = LogCaptor.forClass(TokenWarmup.class);
+
         warmup.onReady();
 
-        // assert
         verify(tokenService, times(1)).refreshToken();
-        assertTrue(subscribed.get(), "El Mono debe haberse suscrito");
+        assertTrue(subscribed.get(), "Debe haberse suscrito al Mono");
 
-        // logs
-        boolean sawInfo = appender.list.stream()
-                .anyMatch(e -> e.getLevel() == Level.INFO &&
-                        e.getFormattedMessage().contains("Token precargado correctamente"));
-        assertTrue(sawInfo, "Debe loguear INFO de precarga correcta");
+        assertTrue(
+            captor.getInfoLogs().stream()
+                  .anyMatch(m -> m.contains("Token precargado correctamente")),
+            "Debe loguear INFO de precarga correcta"
+        );
     }
 
     @Test
-    void onReady_suscribeYLogueaWarnCuandoFalla() {
+    void onReady_suscribeYLogueaWarnEnError_sinLogback() {
         AtomicBoolean subscribed = new AtomicBoolean(false);
-        Mono<String> mono = Mono.<String>error(new RuntimeException("boom"))
-                .doOnSubscribe(s -> subscribed.set(true));
-        when(tokenService.refreshToken()).thenReturn(mono);
+        when(tokenService.refreshToken())
+                .thenReturn(Mono.<String>error(new RuntimeException("boom"))
+                        .doOnSubscribe(s -> subscribed.set(true)));
 
-        // act: no debe lanzar excepción (el error se maneja en el flujo)
+        LogCaptor captor = LogCaptor.forClass(TokenWarmup.class);
+
         assertDoesNotThrow(() -> warmup.onReady());
 
-        // assert
         verify(tokenService, times(1)).refreshToken();
-        assertTrue(subscribed.get(), "El Mono debe haberse suscrito incluso en error");
+        assertTrue(subscribed.get(), "Debe haberse suscrito al Mono");
 
-        boolean sawWarn = appender.list.stream()
-                .anyMatch(e -> e.getLevel() == Level.WARN &&
-                        e.getFormattedMessage().contains("No se pudo precargar el token"));
-        assertTrue(sawWarn, "Debe loguear WARN cuando falla la precarga");
+        assertTrue(
+            captor.getWarnLogs().stream()
+                  .anyMatch(m -> m.contains("No se pudo precargar el token")),
+            "Debe loguear WARN cuando falla la precarga"
+        );
     }
 }
