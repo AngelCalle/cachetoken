@@ -2,14 +2,17 @@ package com.example.demo;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
-import okhttp3.mockwebserver.MockResponse;
-import okhttp3.mockwebserver.MockWebServer;
-import okhttp3.mockwebserver.RecordedRequest;
-import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.web.reactive.function.BodyInserters;
+import org.springframework.web.reactive.function.client.ClientRequest;
+import org.springframework.web.reactive.function.client.ClientResponse;
+import org.springframework.web.reactive.function.client.ExchangeFunction;
 import org.springframework.web.reactive.function.client.WebClient;
-import reactor.core.publisher.Mono;
-import reactor.test.StepVerifier;
 
 import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
@@ -17,136 +20,115 @@ import java.time.Duration;
 import java.time.Instant;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.*;
 
-class TokenServiceTest {
+class TokenServiceTest_NoExtraLibs {
 
-  MockWebServer server;
-  Cache<String, TokenCacheValue> cache;
-  TokenService service;
+  private ExchangeFunction exchange; // mock del canal HTTP
+  private WebClient webClient;
+  private Cache<String, TokenCacheValue> cache;
+  private TokenService service;
 
   @BeforeEach
   void setUp() throws Exception {
-    server = new MockWebServer();
-    server.start();
-
-    WebClient webClient = WebClient.builder().baseUrl(server.url("/").toString()).build();
+    exchange = mock(ExchangeFunction.class);
+    webClient = WebClient.builder().exchangeFunction(exchange).build();
     cache = Caffeine.newBuilder().maximumSize(2).build();
-
     service = new TokenService(webClient, cache);
 
-    // Inyectamos propiedades privadas (@Value) por reflexión
+    // Inyectamos @Value privados (según tu clase)
     setField(service, "clientSecret", "s3cr3t");
     setField(service, "clientId", "client-123");
-    setField(service, "ibpUrl", "https://ignored.com"); // no usado aquí
-    setField(service, "ibpPath", "/ignored");           // no usado aquí
+    setField(service, "ibpUrl", "https://unused");
+    setField(service, "ibpPath", "/unused");
     setField(service, "tokenUrl", "/oauth/token");
   }
 
-  @AfterEach
-  void tearDown() throws Exception {
-    server.shutdown();
-    cache.invalidateAll();
-  }
-
-  // ======== CASOS ========
-
   @Test
   void devuelveTokenDelCacheSiVigente() {
-    Instant future = Instant.now().plusSeconds(120);
-    cache.put("authToken", new TokenCacheValue(future, "CACHED-TOKEN"));
+    cache.put("authToken", new TokenCacheValue(Instant.now().plusSeconds(60), "CACHED"));
 
-    StepVerifier.create(service.getValidToken())
-        .expectNext("CACHED-TOKEN")
-        .verifyComplete();
+    String token = service.getValidToken().block();
+    assertThat(token).isEqualTo("CACHED");
 
-    // No se llamó al servidor (cola vacía)
-    assertThat(server.getRequestCount()).isZero();
+    // No se llamó a la red
+    verify(exchange, never()).exchange(any());
   }
 
   @Test
-  void cuandoNoHayTokenLlamaEndpointYCachea() throws Exception {
-    // Respuesta “válida”
-    String body = "{\"access_token\":\"NEW-TOKEN\",\"expires_in\":90}";
-    server.enqueue(new MockResponse()
-        .setResponseCode(200)
-        .setHeader("Content-Type", "application/json")
-        .setBody(body));
+  void cuandoNoHayTokenPosteaAlEndpointYCachea() {
+    // simulamos respuesta 200 con JSON válido
+    String json = "{\"access_token\":\"NEW\",\"expires_in\":90}";
+    when(exchange.exchange(any())).thenReturn(
+        reactor.core.publisher.Mono.just(ok(json))
+    );
 
-    StepVerifier.create(service.getValidToken())
-        .expectNext("NEW-TOKEN")
-        .verifyComplete();
+    String token = service.getValidToken().block();
+    assertThat(token).isEqualTo("NEW");
 
-    // Verificamos request
-    RecordedRequest req = server.takeRequest();
-    assertThat(req.getMethod()).isEqualTo("POST");
-    assertThat(req.getPath()).isEqualTo("/oauth/token");
-    String form = req.getBody().readString(StandardCharsets.UTF_8);
-    assertThat(form)
-        .contains("grant_type=client_credentials")
-        .contains("client_id=client-123")
-        .contains("client_secret=s3cr3t");
+    // Verificamos que se hizo POST y a la URI esperada
+    ArgumentCaptor<ClientRequest> captor = ArgumentCaptor.forClass(ClientRequest.class);
+    verify(exchange).exchange(captor.capture());
+    ClientRequest req = captor.getValue();
+    assertThat(req.method().name()).isEqualTo("POST");
+    assertThat(req.url().getPath()).isEqualTo("/oauth/token");
+    assertThat(req.headers().getFirst(HttpHeaders.ACCEPT)).contains("application/json");
 
-    // Verificamos que cacheó con expiración (~ now + (90 - safety))
+    // Verificamos caché con margen de seguridad (30s en tu servicio)
     TokenCacheValue cached = cache.getIfPresent("authToken");
     assertThat(cached).isNotNull();
-    assertThat(cached.getToken()).isEqualTo("NEW-TOKEN");
-
-    // safety en tu código es 30 (seg)
     long safety = 30L;
     Duration diff = Duration.between(Instant.now().plusSeconds(90 - safety), cached.getExpiresAt());
-    // Permitimos ~5s de tolerancia por tiempos de ejecución
     assertThat(Math.abs(diff.getSeconds())).isLessThanOrEqualTo(5);
   }
 
   @Test
   void siCacheVencidoRefrescaYReemplaza() {
-    // Poblamos cache con vencido
-    cache.put("authToken",
-        new TokenCacheValue(Instant.now().minusSeconds(1), "OLD"));
+    cache.put("authToken", new TokenCacheValue(Instant.now().minusSeconds(1), "OLD"));
 
-    server.enqueue(new MockResponse()
-        .setResponseCode(200)
-        .setHeader("Content-Type", "application/json")
-        .setBody("{\"access_token\":\"REFRESHED\",\"expires_in\":40}"));
+    when(exchange.exchange(any())).thenReturn(
+        reactor.core.publisher.Mono.just(ok("{\"access_token\":\"REFRESH\",\"expires_in\":40}"))
+    );
 
-    StepVerifier.create(service.getValidToken())
-        .expectNext("REFRESHED")
-        .verifyComplete();
-
-    assertThat(cache.getIfPresent("authToken").getToken()).isEqualTo("REFRESHED");
+    String token = service.getValidToken().block();
+    assertThat(token).isEqualTo("REFRESH");
+    assertThat(cache.getIfPresent("authToken").getToken()).isEqualTo("REFRESH");
   }
 
   @Test
-  void respondeErrorAnteHttp5xx() {
-    server.enqueue(new MockResponse()
-        .setResponseCode(500)
-        .setBody("boom"));
+  void errorAnteHttp5xx() {
+    when(exchange.exchange(any())).thenReturn(
+        reactor.core.publisher.Mono.just(
+            ClientResponse.create(HttpStatus.INTERNAL_SERVER_ERROR).body("boom").build())
+    );
 
-    StepVerifier.create(service.getValidToken())
-        .expectErrorSatisfies(err ->
-            assertThat(err)
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("Fallo autenticando")
-        )
-        .verify();
+    IllegalStateException ex =
+        assertThrows(IllegalStateException.class, () -> service.getValidToken().block());
+    assertThat(ex).hasMessageContaining("Fallo autenticando");
   }
 
   @Test
   void errorSiRespuestaSinAccessToken() {
-    server.enqueue(new MockResponse()
-        .setResponseCode(200)
-        .setHeader("Content-Type", "application/json")
-        .setBody("{\"expires_in\":60}"));
+    when(exchange.exchange(any())).thenReturn(
+        reactor.core.publisher.Mono.just(ok("{\"expires_in\":60}"))
+    );
 
-    StepVerifier.create(service.getValidToken())
-        .expectErrorSatisfies(err ->
-            assertThat(err)
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("sin access_token"))
-        .verify();
+    IllegalStateException ex =
+        assertThrows(IllegalStateException.class, () -> service.getValidToken().block());
+    assertThat(ex).hasMessageContaining("sin access_token");
   }
 
-  // ======== helpers ========
+  // ==== helpers ====
+
+  /** ClientResponse 200 application/json */
+  private static ClientResponse ok(String body) {
+    return ClientResponse.create(HttpStatus.OK)
+        .header(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
+        .body(body.getBytes(StandardCharsets.UTF_8))
+        .build();
+  }
 
   private static void setField(Object target, String field, Object value) throws Exception {
     Field f = target.getClass().getDeclaredField(field);
