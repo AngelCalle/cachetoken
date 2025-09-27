@@ -1,116 +1,119 @@
-// src/test/java/tu/paquete/WebClientServiceImplTest.java
-package tu.paquete;
+package your.pkg;
 
-import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.*;
+import static org.assertj.core.api.Assertions.assertThat;
 
-import java.time.Instant;
+import java.util.Optional;
+import java.util.concurrent.TimeUnit;
 
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.mockito.ArgumentCaptor;
-import org.mockito.Mock;
-import org.mockito.MockitoAnnotations;
-import org.springframework.http.HttpHeaders;
-import org.springframework.http.MediaType;
-import org.springframework.util.LinkedMultiValueMap;
-import org.springframework.web.reactive.function.BodyInserters;
-import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.cache.Cache;
+import org.springframework.cache.CacheManager;
+import org.springframework.cache.caffeine.CaffeineCache;
 
-import reactor.core.publisher.Mono;
-import reactor.test.StepVerifier;
+import com.github.benmanes.caffeine.cache.Cache as CaffeineNative;
+import com.github.benmanes.caffeine.cache.Policy;
 
-class WebClientServiceImplTest {
+public class CacheConfigManagerTest {
 
-    // Mocks de la cadena de WebClient
-    @Mock private WebClient.Builder builder;
-    @Mock private WebClient client;
-    @Mock private WebClient.RequestBodyUriSpec uriSpec;
-    @Mock private WebClient.RequestBodySpec bodySpec;
-    @Mock private WebClient.RequestHeadersSpec<?> headersSpec;
-    @Mock private WebClient.ResponseSpec responseSpec;
+  private final CacheConfig config = new CacheConfig();
 
-    @Mock private Cache<String, TokenCacheValue> cache;
+  @Test
+  void bicCache_y_sepaCache_se_registran_con_politicas_correctas() {
+    CacheManager cm = config.cacheManager();
 
-    private WebClientServiceImpl service;
+    // --- bicCache ---
+    Cache bic = cm.getCache("bicCache");
+    assertThat(bic).as("bicCache debe existir").isNotNull();
 
-    // Datos fijos
-    private final String tokenUrl = "https://auth.example.com/token";
-    private final String clientId = "cid";
-    private final String clientSecret = "csec";
+    CaffeineNative<?, ?> nativeBic = (CaffeineNative<?, ?>) ((CaffeineCache) bic).getNativeCache();
 
-    @BeforeEach
-    void setUp() {
-        MockitoAnnotations.openMocks(this);
+    Optional<Policy.FixedExpiration<?, ?>> expWriteBic = nativeBic.policy().expireAfterWrite();
+    assertThat(expWriteBic).isPresent();
+    long minsBic = expWriteBic.get().getExpiresAfter(TimeUnit.MINUTES);
+    assertThat(minsBic).isEqualTo(15);
 
-        // Stubs comunes de la cadena de llamadas
-        when(builder.baseUrl(anyString())).thenReturn(builder);
-        when(builder.defaultHeader(eq(HttpHeaders.CONTENT_TYPE), eq(MediaType.APPLICATION_FORM_URLENCODED_VALUE))).thenReturn(builder);
-        when(builder.build()).thenReturn(client);
+    Optional<Policy.Eviction<?, ?>> evictionBic = nativeBic.policy().eviction();
+    assertThat(evictionBic).isPresent();
+    assertThat(evictionBic.get().getMaximum()).isEqualTo(1000);
 
-        when(client.post()).thenReturn(uriSpec);
-        when(uriSpec.body(any())).thenReturn(bodySpec);
-        when(bodySpec.retrieve()).thenReturn(responseSpec);
-        // .onStatus(...) devuelve el mismo responseSpec en nuestros tests
-        when(responseSpec.onStatus(any(), any())).thenReturn(responseSpec);
+    // --- sepaCache ---
+    Cache sepa = cm.getCache("sepaCache");
+    assertThat(sepa).as("sepaCache debe existir").isNotNull();
 
-        // Instancia real a probar
-        service = new WebClientServiceImpl(builder, clientId, clientSecret, tokenUrl, cache);
-    }
+    CaffeineNative<?, ?> nativeSepa = (CaffeineNative<?, ?>) ((CaffeineCache) sepa).getNativeCache();
 
-    @Test
-    void refreshToken_devuelveToken_yGuardaEnCache() {
-        // Respuesta válida
-        AuthResponse ar = new AuthResponse();
-        ar.setAccessToken("abc123");
-        ar.setTokenType("Bearer");
-        ar.setExpiresIn(60L);
+    Optional<Policy.FixedExpiration<?, ?>> expWriteSepa = nativeSepa.policy().expireAfterWrite();
+    assertThat(expWriteSepa).isPresent();
+    long minsSepa = expWriteSepa.get().getExpiresAfter(TimeUnit.MINUTES);
+    assertThat(minsSepa).isEqualTo(60);
 
-        when(responseSpec.bodyToMono(AuthResponse.class)).thenReturn(Mono.just(ar));
+    Optional<Policy.Eviction<?, ?>> evictionSepa = nativeSepa.policy().eviction();
+    assertThat(evictionSepa).isPresent();
+    assertThat(evictionSepa.get().getMaximum()).isEqualTo(500);
+  }
 
-        StepVerifier.create(service.refreshToken())
-                .expectNext("abc123")
-                .verifyComplete();
+  
 
-        // Verifica que se usó el builder como esperamos (sanity check)
-        verify(builder).baseUrl(tokenUrl);
-        verify(builder).defaultHeader(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_FORM_URLENCODED_VALUE);
-        verify(client).post();
-        verify(bodySpec).retrieve();
-        verify(responseSpec).onStatus(any(), any());
+  private final CacheConfig config = new CacheConfig();
 
-        // Verifica que se guardó algo en cache con la clave
-        verify(cache, times(1)).put(eq("authToken"), any(TokenCacheValue.class));
-    }
+  @Test
+  void expira_en_minimo_1s_cuando_safety_sobrepasa() throws Exception {
+    Cache<String, TokenCacheValue> cache = config.tokenCache();
 
-    @Test
-    void refreshToken_errorCuandoAccessTokenVacioONulo() {
-        AuthResponse ar = new AuthResponse();
-        ar.setAccessToken("");            // vacío
-        ar.setTokenType("Bearer");
-        ar.setExpiresIn(30L);
+    // expiresAt ~ ahora + 2s; menos 5s de safety => negativo -> debe forzar 1s
+    String key = "k1";
+    cache.put(key, new TokenCacheValue(Instant.now().plusSeconds(2)));
 
-        when(responseSpec.bodyToMono(AuthResponse.class)).thenReturn(Mono.just(ar));
+    assertThat(cache.getIfPresent(key)).isNotNull();
+    // dormir 1200ms para pasar el mínimo de 1s
+    Thread.sleep(1200);
+    assertThat(cache.getIfPresent(key)).isNull();
+  }
+   @Test
+  void expira_a_expiresAt_menos_safety() throws Exception {
+    Cache<String, TokenCacheValue> cache = config.tokenCache();
 
-        StepVerifier.create(service.refreshToken())
-                .expectErrorMatches(e -> e instanceof IllegalStateException &&
-                        e.getMessage().contains("sin access_token"))
-                .verify();
+    // expiresAt = ahora + 7s -> efectivo = 2s
+    String key = "k2";
+    cache.put(key, new TokenCacheValue(Instant.now().plusSeconds(7)));
 
-        verify(cache, never()).put(any(), any());
-    }
+    assertThat(cache.getIfPresent(key)).isNotNull();
+    Thread.sleep(1200);
+    // aún debe existir (~2s total)
+    assertThat(cache.getIfPresent(key)).isNotNull();
+    Thread.sleep(1100);
+    // ya debe haber expirado (~2.3s transcurridos)
+    assertThat(cache.getIfPresent(key)).isNull();
+  }
+   @Test
+  void leer_no_renueva_la_expiracion() throws Exception {
+    Cache<String, TokenCacheValue> cache = config.tokenCache();
 
-    @Test
-    void refreshToken_errorHttpPropagadoDesdeOnStatus() {
-        // Simulamos que tras .onStatus(...) el ResponseSpec termina en error
-        when(responseSpec.bodyToMono(AuthResponse.class))
-                .thenReturn(Mono.error(new IllegalStateException("Falló autenticando (401)")));
+    // efectivo ~2s (7s - 5s)
+    String key = "k3";
+    cache.put(key, new TokenCacheValue(Instant.now().plusSeconds(7)));
 
-        StepVerifier.create(service.refreshToken())
-                .expectErrorMatches(e -> e instanceof IllegalStateException &&
-                        e.getMessage().contains("Falló autenticando"))
-                .verify();
+    // a ~1s, leemos
+    Thread.sleep(1000);
+    assertThat(cache.getIfPresent(key)).isNotNull(); // read
+    // Si la lectura renovara, aún existiría pasado 1.5s más; no debería.
+    Thread.sleep(1500);
+    assertThat(cache.getIfPresent(key)).isNull();
+  }
 
-        verify(cache, never()).put(any(), any());
-    }
-}
+ @Test
+  void leer_no_renueva_la_expiracion() throws Exception {
+    Cache<String, TokenCacheValue> cache = config.tokenCache();
+
+    // efectivo ~2s (7s - 5s)
+    String key = "k3";
+    cache.put(key, new TokenCacheValue(Instant.now().plusSeconds(7)));
+
+    // a ~1s, leemos
+    Thread.sleep(1000);
+    assertThat(cache.getIfPresent(key)).isNotNull(); // read
+    // Si la lectura renovara, aún existiría pasado 1.5s más; no debería.
+    Thread.sleep(1500);
+    assertThat(cache.getIfPresent(key)).isNull();
+  }
+  }
