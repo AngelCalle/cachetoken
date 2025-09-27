@@ -1,93 +1,116 @@
-// src/test/java/tu/paquete/CallIberpayTest.java
+// src/test/java/tu/paquete/WebClientServiceImplTest.java
 package tu.paquete;
 
-import static org.mockito.Mockito.*;
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
 
-import org.junit.jupiter.api.Test;
+import java.time.Instant;
+
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
-import org.mockito.junit.jupiter.MockitoExtension;
-import org.mockito.ArgumentMatchers;
+import org.mockito.MockitoAnnotations;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.web.reactive.function.BodyInserters;
+import org.springframework.web.reactive.function.client.WebClient;
 
 import reactor.core.publisher.Mono;
 import reactor.test.StepVerifier;
 
-@ExtendWith(MockitoExtension.class)
-class CallIberpayTest {
+class WebClientServiceImplTest {
 
-    @Mock
-    private TokenIBPService tokenService;
+    // Mocks de la cadena de WebClient
+    @Mock private WebClient.Builder builder;
+    @Mock private WebClient client;
+    @Mock private WebClient.RequestBodyUriSpec uriSpec;
+    @Mock private WebClient.RequestBodySpec bodySpec;
+    @Mock private WebClient.RequestHeadersSpec<?> headersSpec;
+    @Mock private WebClient.ResponseSpec responseSpec;
 
-    @Mock
-    private VerificationOfPayeeRequest entrada;
+    @Mock private Cache<String, TokenCacheValue> cache;
 
-    private CallIberpay sut; // system under test (spy)
-    private CallIberpay spySut;
+    private WebClientServiceImpl service;
+
+    // Datos fijos
+    private final String tokenUrl = "https://auth.example.com/token";
+    private final String clientId = "cid";
+    private final String clientSecret = "csec";
 
     @BeforeEach
     void setUp() {
-        sut = new CallIberpay(tokenService);
-        // Espiamos para stubear/verificar la invocación interna a callEndpoint(...)
-        spySut = spy(sut);
+        MockitoAnnotations.openMocks(this);
+
+        // Stubs comunes de la cadena de llamadas
+        when(builder.baseUrl(anyString())).thenReturn(builder);
+        when(builder.defaultHeader(eq(HttpHeaders.CONTENT_TYPE), eq(MediaType.APPLICATION_FORM_URLENCODED_VALUE))).thenReturn(builder);
+        when(builder.build()).thenReturn(client);
+
+        when(client.post()).thenReturn(uriSpec);
+        when(uriSpec.body(any())).thenReturn(bodySpec);
+        when(bodySpec.retrieve()).thenReturn(responseSpec);
+        // .onStatus(...) devuelve el mismo responseSpec en nuestros tests
+        when(responseSpec.onStatus(any(), any())).thenReturn(responseSpec);
+
+        // Instancia real a probar
+        service = new WebClientServiceImpl(builder, clientId, clientSecret, tokenUrl, cache);
     }
 
     @Test
-    void validTokenCallEndpoint_usaTokenYLlamaCallEndpointConRetryTrue() {
-        String token = "TOK-123";
-        String bicPartyAgent = "BPAGENT";
-        String bicRequestingAgent = "BRAGENT";
-        String uuid = "uuid-1";
+    void refreshToken_devuelveToken_yGuardaEnCache() {
+        // Respuesta válida
+        AuthResponse ar = new AuthResponse();
+        ar.setAccessToken("abc123");
+        ar.setTokenType("Bearer");
+        ar.setExpiresIn(60L);
 
-        when(tokenService.getValidToken()).thenReturn(Mono.just(token));
-        // Stub de la llamada interna
-        when(spySut.callEndpoint(
-                eq(entrada),
-                eq(bicPartyAgent),
-                eq(bicRequestingAgent),
-                eq(uuid),
-                eq(token),
-                eq(true)
-        )).thenReturn(Mono.just("OK"));
+        when(responseSpec.bodyToMono(AuthResponse.class)).thenReturn(Mono.just(ar));
 
-        StepVerifier.create(spySut.validTokenCallEndpoint(entrada, bicPartyAgent, bicRequestingAgent, uuid))
-                .expectNext("OK")
+        StepVerifier.create(service.refreshToken())
+                .expectNext("abc123")
                 .verifyComplete();
 
-        // Verifica que se usó el token entregado y retry=true
-        verify(spySut, times(1)).callEndpoint(
-                eq(entrada),
-                eq(bicPartyAgent),
-                eq(bicRequestingAgent),
-                eq(uuid),
-                eq(token),
-                eq(true)
-        );
-        verify(tokenService, times(1)).getValidToken();
+        // Verifica que se usó el builder como esperamos (sanity check)
+        verify(builder).baseUrl(tokenUrl);
+        verify(builder).defaultHeader(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_FORM_URLENCODED_VALUE);
+        verify(client).post();
+        verify(bodySpec).retrieve();
+        verify(responseSpec).onStatus(any(), any());
+
+        // Verifica que se guardó algo en cache con la clave
+        verify(cache, times(1)).put(eq("authToken"), any(TokenCacheValue.class));
     }
 
     @Test
-    void validTokenCallEndpoint_noLlamaCallEndpointSiFallaGetValidToken() {
-        when(tokenService.getValidToken()).thenReturn(Mono.error(new IllegalStateException("sin token")));
+    void refreshToken_errorCuandoAccessTokenVacioONulo() {
+        AuthResponse ar = new AuthResponse();
+        ar.setAccessToken("");            // vacío
+        ar.setTokenType("Bearer");
+        ar.setExpiresIn(30L);
 
-        StepVerifier.create(spySut.validTokenCallEndpoint(entrada, "A", "B", "C"))
-                .expectError(IllegalStateException.class)
+        when(responseSpec.bodyToMono(AuthResponse.class)).thenReturn(Mono.just(ar));
+
+        StepVerifier.create(service.refreshToken())
+                .expectErrorMatches(e -> e instanceof IllegalStateException &&
+                        e.getMessage().contains("sin access_token"))
                 .verify();
 
-        verify(spySut, never()).callEndpoint(any(), anyString(), anyString(), anyString(), anyString(), anyBoolean());
+        verify(cache, never()).put(any(), any());
     }
 
     @Test
-    void validTokenCallEndpoint_propagaErrorDeCallEndpoint() {
-        when(tokenService.getValidToken()).thenReturn(Mono.just("TOK"));
-        when(spySut.callEndpoint(any(), anyString(), anyString(), anyString(), anyString(), eq(true)))
-                .thenReturn(Mono.error(new RuntimeException("fallo http")));
+    void refreshToken_errorHttpPropagadoDesdeOnStatus() {
+        // Simulamos que tras .onStatus(...) el ResponseSpec termina en error
+        when(responseSpec.bodyToMono(AuthResponse.class))
+                .thenReturn(Mono.error(new IllegalStateException("Falló autenticando (401)")));
 
-        StepVerifier.create(spySut.validTokenCallEndpoint(entrada, "A", "B", "C"))
-                .expectErrorMatches(e -> e instanceof RuntimeException && e.getMessage().contains("fallo http"))
+        StepVerifier.create(service.refreshToken())
+                .expectErrorMatches(e -> e instanceof IllegalStateException &&
+                        e.getMessage().contains("Falló autenticando"))
                 .verify();
 
-        verify(spySut, times(1)).callEndpoint(any(), anyString(), anyString(), anyString(), anyString(), eq(true));
+        verify(cache, never()).put(any(), any());
     }
 }
