@@ -1,0 +1,21 @@
+
+app:
+  auth:
+    url: "https://dummyjson.com/auth/login"
+    username: "emilys"
+    password: "emilyspass"
+    # Valor por defecto que devuelve el backend en tu ejemplo.
+    expiresInMins: 30
+    # Cambia si tu backend usa otra clave JSON para el token (p. ej. "token").
+    tokenJsonKey: "accessToken"
+
+spring:
+  main:
+    banner-mode: "console"
+  application:
+    name: cachetoken
+
+logging:
+  level:
+    root: INFO
+    com.example.authcache: DEBUG
