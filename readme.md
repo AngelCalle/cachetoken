@@ -1,138 +1,87 @@
-package com.example.demo;
+// src/test/java/tu/paquete/AuthResponseTest.java
+package tu.paquete;
 
-import com.github.benmanes.caffeine.cache.Cache;
-import com.github.benmanes.caffeine.cache.Caffeine;
+import static org.junit.jupiter.api.Assertions.*;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.mockito.ArgumentCaptor;
-import org.springframework.http.HttpHeaders;
-import org.springframework.http.HttpStatus;
-import org.springframework.http.MediaType;
-import org.springframework.web.reactive.function.BodyInserters;
-import org.springframework.web.reactive.function.client.ClientRequest;
-import org.springframework.web.reactive.function.client.ClientResponse;
-import org.springframework.web.reactive.function.client.ExchangeFunction;
-import org.springframework.web.reactive.function.client.WebClient;
 
-import java.lang.reflect.Field;
-import java.nio.charset.StandardCharsets;
-import java.time.Duration;
-import java.time.Instant;
+class AuthResponseTest {
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.*;
+    private ObjectMapper mapper;
 
-class TokenServiceTest_NoExtraLibs {
+    @BeforeEach
+    void setUp() {
+        mapper = new ObjectMapper();
+        // No es necesario configurar FAIL_ON_UNKNOWN_PROPERTIES: la clase tiene @JsonIgnoreProperties(ignoreUnknown = true)
+    }
 
-  private ExchangeFunction exchange; // mock del canal HTTP
-  private WebClient webClient;
-  private Cache<String, TokenCacheValue> cache;
-  private TokenService service;
+    @Test
+    void deserializaSnakeCase_yCamposDesconocidos() throws Exception {
+        String json = """
+          {
+            "access_token": "abc123",
+            "token_type": "Bearer",
+            "expires_in": 3600,
+            "some_unknown_field": "ignored"
+          }
+        """;
 
-  @BeforeEach
-  void setUp() throws Exception {
-    exchange = mock(ExchangeFunction.class);
-    webClient = WebClient.builder().exchangeFunction(exchange).build();
-    cache = Caffeine.newBuilder().maximumSize(2).build();
-    service = new TokenService(webClient, cache);
+        AuthResponse dto = mapper.readValue(json, AuthResponse.class);
 
-    // Inyectamos @Value privados (según tu clase)
-    setField(service, "clientSecret", "s3cr3t");
-    setField(service, "clientId", "client-123");
-    setField(service, "ibpUrl", "https://unused");
-    setField(service, "ibpPath", "/unused");
-    setField(service, "tokenUrl", "/oauth/token");
-  }
+        assertEquals("abc123", dto.getAccessToken());
+        assertEquals("Bearer", dto.getTokenType());
+        assertEquals(3600L, dto.getExpiresIn());
+    }
 
-  @Test
-  void devuelveTokenDelCacheSiVigente() {
-    cache.put("authToken", new TokenCacheValue(Instant.now().plusSeconds(60), "CACHED"));
+    @Test
+    void deserializaUsandoAlias() throws Exception {
+        // Aunque @JsonNaming ya mapea snake_case, probamos explícitamente los alias
+        String jsonConAlias = """
+          {
+            "access_token": "token-x",
+            "token_type": "bearer",
+            "expires_in": 1200
+          }
+        """;
 
-    String token = service.getValidToken().block();
-    assertThat(token).isEqualTo("CACHED");
+        AuthResponse dto = mapper.readValue(jsonConAlias, AuthResponse.class);
 
-    // No se llamó a la red
-    verify(exchange, never()).exchange(any());
-  }
+        assertAll(
+            () -> assertEquals("token-x", dto.getAccessToken()),
+            () -> assertEquals("bearer", dto.getTokenType()),
+            () -> assertEquals(1200L, dto.getExpiresIn())
+        );
+    }
 
-  @Test
-  void cuandoNoHayTokenPosteaAlEndpointYCachea() {
-    // simulamos respuesta 200 con JSON válido
-    String json = "{\"access_token\":\"NEW\",\"expires_in\":90}";
-    when(exchange.exchange(any())).thenReturn(
-        reactor.core.publisher.Mono.just(ok(json))
-    );
+    @Test
+    void serializaEnSnakeCase() throws JsonProcessingException {
+        AuthResponse dto = new AuthResponse();
+        dto.setAccessToken("tok-999");
+        dto.setTokenType("Bearer");
+        dto.setExpiresIn(86400L);
 
-    String token = service.getValidToken().block();
-    assertThat(token).isEqualTo("NEW");
+        String json = mapper.writeValueAsString(dto);
 
-    // Verificamos que se hizo POST y a la URI esperada
-    ArgumentCaptor<ClientRequest> captor = ArgumentCaptor.forClass(ClientRequest.class);
-    verify(exchange).exchange(captor.capture());
-    ClientRequest req = captor.getValue();
-    assertThat(req.method().name()).isEqualTo("POST");
-    assertThat(req.url().getPath()).isEqualTo("/oauth/token");
-    assertThat(req.headers().getFirst(HttpHeaders.ACCEPT)).contains("application/json");
+        // Comprueba nombres snake_case y valores
+        assertTrue(json.contains("\"access_token\":\"tok-999\""), json);
+        assertTrue(json.contains("\"token_type\":\"Bearer\""), json);
+        assertTrue(json.contains("\"expires_in\":86400"), json);
+        // No debería contener nombres camelCase
+        assertFalse(json.contains("accessToken"), json);
+    }
 
-    // Verificamos caché con margen de seguridad (30s en tu servicio)
-    TokenCacheValue cached = cache.getIfPresent("authToken");
-    assertThat(cached).isNotNull();
-    long safety = 30L;
-    Duration diff = Duration.between(Instant.now().plusSeconds(90 - safety), cached.getExpiresAt());
-    assertThat(Math.abs(diff.getSeconds())).isLessThanOrEqualTo(5);
-  }
+    @Test
+    void gettersYSettersFuncionan() {
+        AuthResponse dto = new AuthResponse();
+        dto.setAccessToken("A");
+        dto.setTokenType("B");
+        dto.setExpiresIn(1L);
 
-  @Test
-  void siCacheVencidoRefrescaYReemplaza() {
-    cache.put("authToken", new TokenCacheValue(Instant.now().minusSeconds(1), "OLD"));
-
-    when(exchange.exchange(any())).thenReturn(
-        reactor.core.publisher.Mono.just(ok("{\"access_token\":\"REFRESH\",\"expires_in\":40}"))
-    );
-
-    String token = service.getValidToken().block();
-    assertThat(token).isEqualTo("REFRESH");
-    assertThat(cache.getIfPresent("authToken").getToken()).isEqualTo("REFRESH");
-  }
-
-  @Test
-  void errorAnteHttp5xx() {
-    when(exchange.exchange(any())).thenReturn(
-        reactor.core.publisher.Mono.just(
-            ClientResponse.create(HttpStatus.INTERNAL_SERVER_ERROR).body("boom").build())
-    );
-
-    IllegalStateException ex =
-        assertThrows(IllegalStateException.class, () -> service.getValidToken().block());
-    assertThat(ex).hasMessageContaining("Fallo autenticando");
-  }
-
-  @Test
-  void errorSiRespuestaSinAccessToken() {
-    when(exchange.exchange(any())).thenReturn(
-        reactor.core.publisher.Mono.just(ok("{\"expires_in\":60}"))
-    );
-
-    IllegalStateException ex =
-        assertThrows(IllegalStateException.class, () -> service.getValidToken().block());
-    assertThat(ex).hasMessageContaining("sin access_token");
-  }
-
-  // ==== helpers ====
-
-  /** ClientResponse 200 application/json */
-  private static ClientResponse ok(String body) {
-    return ClientResponse.create(HttpStatus.OK)
-        .header(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
-        .body(body.getBytes(StandardCharsets.UTF_8))
-        .build();
-  }
-
-  private static void setField(Object target, String field, Object value) throws Exception {
-    Field f = target.getClass().getDeclaredField(field);
-    f.setAccessible(true);
-    f.set(target, value);
-  }
+        assertEquals("A", dto.getAccessToken());
+        assertEquals("B", dto.getTokenType());
+        assertEquals(1L, dto.getExpiresIn());
+    }
 }
