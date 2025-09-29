@@ -2,9 +2,7 @@ package com.example.demo;
 
 import java.time.Instant;
 
-import lombok.AllArgsConstructor;
 import lombok.Getter;
-import lombok.RequiredArgsConstructor;
 import lombok.Setter;
 
 @Getter
