@@ -2,21 +2,24 @@ package com.example.demo;
 
 import java.time.Instant;
 
-import lombok.Getter;
-import lombok.Setter;
+import io.micrometer.common.lang.NonNull;
+import lombok.Builder;
+import lombok.Value;
+import lombok.With;
 
-@Getter
-@Setter
+//Si la vas a deserializar con Jackson vía builder, añade:
+//import lombok.extern.jackson.Jacksonized;
+
+@Value			// genera: privados + final, getters, equals/hashCode, toString
+@Builder		// genera builder
+@With		// genera "withToken(...)", "withExpiresAt(...)" (útil para copiar con cambios)
+//@Jacksonized  // <-- descomenta si usas Jackson con el builder
 public class TokenCacheValue {
-	TokenCacheValue( String token,Instant expiresAt) {
-		this.token = token;
-		this.expiresAt = expiresAt;
-	}
-	TokenCacheValue( Instant expiresAt) {
-		this.token = "";
-		this.expiresAt = expiresAt;
-	}
-	private final String token;
-	private final Instant expiresAt;
+
+	@Builder.Default
+	String token = ""; // valor por defecto si no lo pasas al builder
+
+	@NonNull
+	Instant expiresAt; // requerido por el builder
 
 }

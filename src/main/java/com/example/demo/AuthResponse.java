@@ -1,33 +1,24 @@
 package com.example.demo;
 
-import com.fasterxml.jackson.annotation.JsonAnyGetter;
-import com.fasterxml.jackson.annotation.JsonAnySetter;
-import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonProperty;
 
-import java.util.HashMap;
-import java.util.Map;
+import lombok.Getter;
+import lombok.Setter;
 
-/**
- * Modelo flexible que permite leer el token desde cualquier clave (p. ej. "accessToken" o "token")
- * sin acoplar el POJO a un nombre de campo específico.
- */
+@Getter
+@Setter
 public class AuthResponse {
 
-  @JsonIgnore
-  private Map<String, Object> raw = new HashMap<>();
-
-  @JsonAnySetter
-  public void put(String key, Object value) {
-    raw.put(key, value);
-  }
-
-  @JsonAnyGetter
-  public Map<String, Object> any() {
-    return raw;
-  }
-
-  public Object get(String key) {
-    return raw.get(key);
-  }
+    @JsonProperty("access_token")
+    private String accessToken;
+    
+    @JsonProperty("token_type")
+    private String tokenType; // e.g., "Bearer"
+    
+    @JsonProperty("expires_in")
+    private Long expiresIn;   // en segundos
+    
+    @JsonProperty("scope")
+    private String scope;
   
 }

@@ -22,7 +22,7 @@ public class CaffeineConfig {
    */
   @Bean
   Cache<String, TokenCacheValue> tokenCache() {
-	  log.info("1");
+	
     Expiry<String, TokenCacheValue> expiry = new Expiry<>() {
       private static final Duration SAFETY = Duration.ofSeconds(5);
       
@@ -43,7 +43,6 @@ public class CaffeineConfig {
       }
 
       private long nanosUntil(TokenCacheValue value) {
-    	  log.info("2");
         Instant now = Instant.now();
         Instant target = value.getExpiresAt().minus(SAFETY);
         long nanos = Duration.between(now, target).toNanos();

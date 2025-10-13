@@ -17,8 +17,7 @@ public class TokenWarmup {
 	}
 
 	/**
-	 * Se ejecuta cuando la app está lista: precarga el token sin bloquear el hilo
-	 * NIO
+	 * Se ejecuta cuando la app está lista: precarga el token sin bloquear el hilo.
 	 */
 	@EventListener(ApplicationReadyEvent.class)
 	public void onReady() {
@@ -26,4 +25,5 @@ public class TokenWarmup {
 				e -> log.warn("No se pudo precargar el token (se intentará cuando haga falta): {}", e.toString()))
 				.subscribe(); // importante: NO block(), suscríbete
 	}
+
 }

@@ -2,68 +2,108 @@ package com.example.demo;
 
 import com.github.benmanes.caffeine.cache.Cache;
 
+import io.micrometer.common.lang.NonNull;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
+import org.springframework.web.reactive.function.BodyInserters;
+import org.springframework.web.reactive.function.BodyInserters.FormInserter;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Mono;
 
 import java.time.Duration;
 import java.time.Instant;
-import java.util.Objects;
 
 @Slf4j
 @Service
+@RequiredArgsConstructor // genera el constructor con los campos final/@NonNull
 public class TokenService {
 	
-	private static final String CACHE_KEY = "authToken";
+	private static final String CACHE_KEY = "authToken";	
+	private static final String BEARER = "Bearer ";
 
-	private final WebClient webClient;
-	private final AuthProperties props;
-	private final Cache<String, TokenCacheValue> cache;
+    private final @NonNull WebClient webClient;
+    private final @NonNull AuthProperties props;
+    private final @NonNull Cache<String, TokenCacheValue> cache;
 
-	public TokenService(WebClient webClient, AuthProperties props, Cache<String, TokenCacheValue> cache) {
-		this.webClient = webClient;
-		this.props = props;
-		this.cache = cache;
-	}
-
+    /** Devuelve SIEMPRE el valor completo del header Authorization (p. ej., "Bearer xxx") */
 	public Mono<String> getValidToken() {
 		TokenCacheValue cached = cache.getIfPresent(CACHE_KEY);
 		if (cached != null && cached.getExpiresAt().isAfter(Instant.now())) {
-			return Mono.just(cached.getToken());
+			return Mono.just(cached.getToken()); // ya viene con "Bearer "
 		}
 		return refreshToken();
 	}
 
+	/** Refresca y devuelve SIEMPRE "Bearer xxx" */
 	public synchronized Mono<String> refreshToken() {
 		// doble check por si otro hilo refrescó
 		TokenCacheValue again = cache.getIfPresent(CACHE_KEY);
 		if (again != null && again.getExpiresAt().isAfter(Instant.now())) {
 			return Mono.just(again.getToken());
 		}
+		
+		FormInserter<String> body = BodyInserters
+		.fromFormData("grant_type", "client_credentials")
+                .with("client_id", props.getClientId())
+                .with("client_secret", props.getClientSecret());
+		
+	     if (props.getScope() != null && !props.getScope().isBlank()) {
+	            body = body.with("scope", props.getScope());
+	       }
 
-		AuthRequest body = new AuthRequest(props.getUsername(), props.getPassword(), props.getExpiresInMins());
-		log.info("llama al tokennnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn");
+	    return webClient
+	            .post()
+	            .uri(props.getUrl())
+	            .contentType(MediaType.APPLICATION_FORM_URLENCODED)
+	            .accept(MediaType.APPLICATION_JSON)
+	            .body(body)
+	            .retrieve()
+	            .onStatus(s -> s.is4xxClientError() || s.is5xxServerError(),
+	                resp -> resp.bodyToMono(String.class)
+	                    .defaultIfEmpty("")
+	                    .flatMap(b -> Mono.error(new IllegalStateException(
+	                        "Fallo autenticando (" + resp.statusCode() + "): " + b))))
+	            .bodyToMono(AuthResponse.class)
+	            .flatMap(ar -> {
+	            	
+	                String token = ar.getAccessToken();
+	                if (token == null || token.isBlank()) {
+	                    return Mono.error(new IllegalStateException("No se encontró 'access_token' en la respuesta OAuth"));
+	                }
 
-		return webClient.post().uri(props.getUrl()).contentType(MediaType.APPLICATION_JSON)
-				.accept(MediaType.APPLICATION_JSON).bodyValue(body).retrieve()
-				.onStatus(s -> s.is4xxClientError() || s.is5xxServerError(), resp -> resp.bodyToMono(String.class)
-						.defaultIfEmpty("")
-						.flatMap(b -> Mono.error(
-								new IllegalStateException("Fallo autenticando (" + resp.statusCode() + "): " + b))))
-				.bodyToMono(AuthResponse.class).flatMap(ar -> {
-					Object tokenRaw = ar.get(props.getTokenJsonKey());
-					if (tokenRaw == null) {
-						return Mono.error(
-								new IllegalStateException("No se encontró la clave '" + props.getTokenJsonKey() + "'"));
-					}
-					String token = Objects.toString(tokenRaw);
-					Duration ttl = Duration.ofMinutes(props.getExpiresInMins());
-					Instant expiresAt = Instant.now().plus(ttl);
-					cache.put(CACHE_KEY, new TokenCacheValue(token, expiresAt));
-					return Mono.just(token);
-				});
-	}
+	                long skew = Math.max(0L, props.getExpiresInMins()); // p. ej., 60
+	                long expiresInSec = (ar.getExpiresIn() != null && ar.getExpiresIn() > skew)
+	                    ? ar.getExpiresIn() - skew
+	                    : 60L; // fallback mínimo
+
+	                Duration ttl = Duration.ofSeconds(expiresInSec);
+	                Instant expiresAt = Instant.now().plus(ttl);
+
+	                String bearer = BEARER + token;        // opcional
+	                // Guarda solo el valor del token o "Bearer <token>" si te resulta más cómodo
+	                cache.put(CACHE_KEY, TokenCacheValue.builder()
+	                	    .token(bearer)
+	                	    .expiresAt(expiresAt)
+	                	    .build());
+	                
+	                // No expongas secretos en logs. Si necesitas log, usa nivel debug e imprime el TTL.
+	                log.error("Nuevo access token; expira en {}s; token = {} ",
+	                    Duration.between(Instant.now(), expiresAt).toSeconds(),
+	                    mask(bearer));
+	             
+	                return Mono.just(token);
+	            });
+	    
+		}
+	
+		//	Helper para enmascarar:
+		private static String mask(String token) {
+		    if (token == null || token.length() < 10) return "****";
+		    int n = token.length();
+		    return token.substring(0, 6) + " …" + token.substring(n - 4);
+		}
+		
 }

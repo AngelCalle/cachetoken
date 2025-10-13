@@ -20,11 +20,14 @@ public class AuthProperties {
   private String url;
 
   @NotBlank
-  private String username;
+  private String clientId;
 
   @NotBlank
-  private String password;
+  private String clientSecret;
 
+  @NotBlank
+  private String scope;
+  
   @Min(1)
   private int expiresInMins = 30;
 

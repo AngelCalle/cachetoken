@@ -16,14 +16,16 @@ public class UsersController {
 	private final UsersClient client;
 	private final AtomicInteger idx = new AtomicInteger(0);
 
+
+	public UsersController(UsersClient client) {
+		this.client = client;
+	}
+	
 	private final List<Map<String, Object>> PAYLOADS = List.of(
 			Map.of("firstName", "Muhammad", "lastName", "Ovi", "age", 25),
 			Map.of("firstName", "Ada", "lastName", "Lovelace", "age", 36),
 			Map.of("firstName", "Linus", "lastName", "Torvalds", "age", 54));
 
-	public UsersController(UsersClient client) {
-		this.client = client;
-	}
 
 	@PostMapping(value = "/add-rotating", produces = MediaType.APPLICATION_JSON_VALUE)
 	public Mono<ResponseEntity<String>> addRotating() {
