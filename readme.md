@@ -1,3 +1,4 @@
+
 public class AuthResponse {
   private String access_token;
   private long expires_in;
